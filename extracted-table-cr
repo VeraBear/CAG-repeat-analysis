@@ -1,0 +1,54 @@
+library(readr)
+library(tidyverse)
+library(stringr)
+
+df <- read_tsv("FAZ10795_pass_barcode20_ac6d2943_c09bf8d7.detail2.txt", col_types = cols(.default = "c"), n_max=100)
+
+extracted <- df %>%
+  mutate(CAG_repeat = str_match(FIELDS, "^[^,]*,([^,]*),")[,2]) %>% 
+  select(CAG_repeat) %>% 
+  filter(!is.na(CAG_repeat), CAG_repeat != "NA") %>%
+  mutate(
+    CAG_count = str_count(CAG_repeat, "CAG"), # < count CAGs
+    total_length = str_length(CAG_repeat),
+    highlighted_string = str_replace_all(CAG_repeat, "CAG", "[CAG]"),
+    indexing_errors = map_chr(CAG_repeat, function(seq) {
+      i <- 1
+      bad_chunks <- c()
+      while (i <= (nchar(seq) - 2)) {
+        triplet <- substr(seq, i, i + 2)
+        if (triplet == "CAG") {
+          i <- i + 3
+        } else {
+          # Look ahead for the next CAG
+          next_cag <- str_locate(substr(seq, i, nchar(seq)), "CAG")[1]
+          if (is.na(next_cag)) {
+            bad_chunks <- c(bad_chunks, substr(seq, i, nchar(seq)))
+            break
+          } else {
+            end <- i + next_cag - 2
+            bad_chunks <- c(bad_chunks, substr(seq, i, end))
+            i <- end + 1
+          }
+        }
+      }
+      paste(bad_chunks, collapse = ", ")
+    }),
+    
+    corrected_CAG_length = map_int(CAG_repeat, function(seq) {
+      triplets <- rep(TRUE, str_count(seq, "CAG")) 
+      
+      match <- str_match(seq, "(CAA.{0,2}CAG)$")
+      if (!is.na(match[1])) {
+        triplets <- append(triplets, TRUE)
+      }
+      
+      sum(triplets) * 3 
+    }),
+    corrected_purity = corrected_CAG_length / total_length
+  )
+
+View(extracted)
+
+
+saveRDS(extracted, "Extracted_table.rds")
