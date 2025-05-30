@@ -50,5 +50,21 @@ extracted <- df %>%
 
 View(extracted)
 
+analyzed <- extracted %>% 
+  select(CAG_repeat, indexing_errors) %>% 
+  mutate(
+    insertion_1b = str_split(indexing_errors, ",\\s*") %>% 
+      map_int(~ sum(nchar(.) == 1)),
+    insertion_2b = str_split(indexing_errors, ",\\s*") %>% 
+      map_int(~ sum(nchar(.) == 2 & !. %in% c("CA", "CG", "AG"))),
+    deletion = str_split(indexing_errors, ",\\s*") %>% 
+      map_int(~ sum(nchar(.) == 2 & . %in% c("CA", "CG", "AG")))
+    )
+
+
+View(analyzed)
+
+sum(analyzed$insertion_1b)
+
 
 saveRDS(extracted, "Extracted_table.rds")
