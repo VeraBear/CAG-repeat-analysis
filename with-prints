@@ -1,0 +1,99 @@
+library(readr)
+library(tidyverse)
+library(stringr)
+library(future)
+library(furrr)
+
+plan(multisession)
+
+print(now())
+df <- read_tsv("FAZ10795_pass_barcode20_ac6d2943_c09bf8d7.detail2.txt", col_types = cols(.default = "c"), n_max = 10000)
+
+message("read df ", now())
+extracted <- df %>%
+  mutate(CAG_repeat = str_match(FIELDS, "^[^,]*,([^,]*),")[,2])
+message("Selected out the middle part", now()) 
+
+extracted <- extracted %>% 
+  select(CAG_repeat) %>% 
+  filter(!is.na(CAG_repeat), CAG_repeat != "NA")
+message("Filtered out NA", now())
+
+extracted <- extracted %>% 
+  mutate(
+    CAG_count = {message("counting CAG ", now())
+      str_count(CAG_repeat, "CAG")}, 
+    
+    total_length = {message("calculating length ", now())
+      str_length(CAG_repeat)},
+    
+    highlighted_string = {message("highlighting string ", now())
+      str_replace_all(CAG_repeat, "CAG", "[CAG]")},
+    
+    message("start indexing errors", now()),
+    indexing_errors = 
+      future_map_chr(CAG_repeat, function(seq) {
+      i <- 1
+      bad_chunks <- c()
+      while (i <= (nchar(seq) - 2)) {
+        triplet <- substr(seq, i, i + 2)
+        if (triplet == "CAG") {
+          i <- i + 3
+        } else {
+          # Look ahead for the next CAG
+          next_cag <- str_locate(substr(seq, i, nchar(seq)), "CAG")[1]
+          if (is.na(next_cag)) {
+            bad_chunks <- c(bad_chunks, substr(seq, i, nchar(seq)))
+            break
+          } else {
+            end <- i + next_cag - 2
+            bad_chunks <- c(bad_chunks, substr(seq, i, end))
+            i <- end + 1
+          }
+        }
+      }
+      paste(bad_chunks, collapse = ", ")
+    }),
+      message("finish indexing errors", now()),
+    
+    corrected_CAG_length = map_int(CAG_repeat, function(seq) {
+      triplets <- rep(TRUE, str_count(seq, "CAG")) 
+      
+      match <- str_match(seq, "(CAA.{0,2}CAG)$")
+      if (!is.na(match[1])) {
+        triplets <- append(triplets, TRUE)
+      }
+      
+      sum(triplets) * 3 
+    }),
+    corrected_purity = corrected_CAG_length / total_length
+  )
+
+View(extracted)
+
+
+
+library(ggplot2)
+
+all_chunks <- unlist(str_split(extracted$indexing_errors, ",\\s*"))
+
+chunk_lengths <- str_length(all_chunks)
+
+chunk_df <- data.frame(length = chunk_lengths)
+View(chunk_df)
+
+ggplot(chunk_df, aes(x = length)) +
+  geom_histogram(binwidth = 1, fill = "steelblue") +
+  labs(
+    title = "Distribution of Chunk Lengths",
+    x = "Chunk Length (# of bases)",
+    y = "Freq"
+  ) +
+  scale_x_continuous(breaks = seq(0, 20, by = 1))+
+  scale_y_continuous(breaks = seq(0, 500, by = 20))+
+  xlim(0,20)+
+  ylim(0,500)+
+  theme_minimal()
+
+
+
