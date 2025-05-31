@@ -65,6 +65,28 @@ analyzed <- extracted %>%
 View(analyzed)
 
 sum(analyzed$insertion_1b)
-
+sum(unlist(str_split(extracted$indexing_errors, ",\\s*")) == "CCAA")
+sum(str_length(unlist(str_split(extracted$indexing_errors, ",\\s*"))) == 3)
 
 saveRDS(extracted, "Extracted_table.rds")
+
+
+library(ggplot2)
+
+all_chunks <- unlist(str_split(extracted$indexing_errors, ",\\s*"))
+
+chunk_lengths <- str_length(all_chunks)
+
+chunk_df <- data.frame(length = chunk_lengths)
+View(chunk_df)
+
+ggplot(chunk_df, aes(x = length)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "black") +
+  labs(
+    title = "Distribution of Chunk Lengths",
+    x = "Chunk Length (# of bases)",
+    y = "Freq"
+  ) +
+  scale_x_continuous(breaks = seq(0,10, by = 1))+
+  scale_y_continuous(breaks = seq(0, 13, by = 1))+
+  theme_minimal()
