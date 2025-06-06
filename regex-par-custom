@@ -1,10 +1,22 @@
-library(readr)
 library(tidyverse)
 library(stringr)
-library(future)
-library(furrr)
 library(purrr)
 library(data.table)
+library(doParallel)
+
+
+# SET UP PARALLEL
+#----------------------------
+# detect cores in machine (mine has 4 cores)
+# initialise cluster of threads
+# register the cluster
+nThreads <- detectCores()
+cl <- makeCluster(nThreads)
+registerDoParallel(cl, cores=nThreads)
+#----------------------------
+
+
+
 
 # CUSTOM FUNCTIONS
 
@@ -43,7 +55,7 @@ leave_last_CAA <- function(seq){
 message("Start time: ", now())
 
 # read a data.table, with only FIELDS column to modify it
-df <- fread("FAZ10795_pass_barcode20_ac6d2943_c09bf8d7.detail2.txt", nrows = 10000,
+df <- fread("FAZ10795_pass_barcode20_ac6d2943_c09bf8d7.detail2.txt", nrows = 100000,
             select = "FIELDS")
 
 message("Read df: ", now())
@@ -60,36 +72,60 @@ extracted <- df %>%
          total_length = str_length(CAG_repeat),
          highlighted_string = str_replace_all(CAG_repeat, "CAG", "[CAG]"))
 
-
-
 message("Calculated count/length/highlighted: ", now())
 
-message("Start indexing_errors: ", now())
-View(extracted)
+
+CAG_repeat <- extracted$CAG_repeat
+
+# export CAG_repeat and function to the cluster + used library in function
+clusterExport(cl, varlist = c("CAG_repeat", "get_sequence_error_delimeter"))
+clusterEvalQ(cl, {library(stringr)
+  library(purrr)})
+
+# parallel character mapping (like map_chr)
+#results <- parLapply(cl, extracted$CAG_repeat, get_sequence_error_delimeter)
+
+
+
+
+
+
+message("Start indexing_errors: ", time_begin_errors <- now())
+#View(extracted)
 # add column with errors from get_sequence_error_delimeter function
-extracted <- extracted %>% 
-  mutate(
-    indexing_errors <- future_map_chr(CAG_repeat, get_sequence_error_delimeter)
-  )
-
-message("Finished indexing_errors: ", now())
+extracted <- extracted %>%
+  mutate(indexing_errors = parLapply(cl, CAG_repeat, get_sequence_error_delimeter))
 
 
+message("Finished indexing_errors: ", time_end_errors <- now())
+
+message("Total error search time: ", time_end_errors-time_begin_errors)
+
+stopCluster(cl)
+
+
+message("Start eliminate last CAA + purity: ", time_begin_CAA <- now())
 # use leave_last_CAA function to calculate correct purity and ignore last CAA before last CAG
 extracted <- extracted %>%
   mutate(
     CAG_length = map_int(CAG_repeat, leave_last_CAA),
     purity = CAG_length / total_length
   )
+message("Finished eliminate last CAA + purity: ", time_end_CAA <- now())
+message("Total CAA + purity time: ", time_end_CAA-time_begin_CAA)
+
 
 
 #--------------------
 # create single vector from indexing_errors
 # get lengths of each error for distribution of lengths
 
+message("Start distrib error lengths: ", time_begin_distr <- now())
 single_vector_errors <- unlist(str_split(extracted$indexing_errors, ","))
 length_distrib_error <- str_length(single_vector_errors)
 df_distrib_error_length <- data.frame(length = length_distrib_error)
+message("Finish distrib error lengths: ", time_end_distr <- now())
+message("Total distribution time: ", time_end_distr-time_begin_distr)
 #--------------------
 
 

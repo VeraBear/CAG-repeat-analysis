@@ -1,0 +1,141 @@
+library(readr)
+library(tidyverse)
+library(stringr)
+library(future)
+library(furrr)
+library(purrr)
+
+plan(multisession, workers = 4)
+
+
+# 1. -----------------------
+# function to find all the errors, regardless of length, in the sequence
+# if the triplet is not CAG, look for next triplet, get its beginning index, add to the beginning index of the error, and subtract 2
+# substring the entire error from beginning to end
+find_cag <- function(seq) {
+  i <- 1
+  bad_chunks <- c()
+  
+  while (i <= (nchar(seq) - 2)) {
+    
+    triplet <- substr(seq, i, i + 2)
+    
+    if (triplet == "CAG") {
+      i <- i + 3
+      
+    } else {
+      
+      # extract everything from start of error portion seq till the end of seq; make it a new chr vector
+      # find in new vector beginning and end of first occurring CAG; take only beginning
+      left_portion <- substr(seq, i, nchar(seq))
+      next_cag <- str_locate(left_portion, "CAG")[1]
+      
+      
+      # if the end of seq and no more CAG (junk after last CAG), extract the rest of seq
+      # if found next CAG, add its beginning to i, and subtract 2 to get ending index of error portion
+      if (is.na(next_cag)) {
+        bad_chunks <- c(bad_chunks, substr(seq, i, nchar(seq)))
+        break
+      } else {
+        end_of_junk <- i + next_cag - 2
+        bad_chunks <- c(bad_chunks, substr(seq, i, end_of_junk))
+        i <- end_of_junk + 1
+      }
+    }
+  }
+  
+  # separate bad_chunks with "," for readebility
+  paste(bad_chunks, collapse = ", ")
+}
+#------------------------------
+
+#==========================
+
+# 2. --------------------------
+# function to not error CAA before last CAG, leaving room for possible seq error
+# create logical vector, length of number of CAG
+# create chr vector match that matches the initial string if regex TRUE or is empty vector if regex FALSE
+# Expl to regex: find CAA before last CAG, there can be any number of characters in between, but should not contain a single CAG
+# if match vector is not empty, add one more TRUE to triplets, which would make up for "1 additional CAG"
+# Used only for counting CAG total length and purity
+
+leave_last_CAA <- function(seq){
+  triplets <- rep(TRUE, str_count(seq, "CAG")) 
+  match <- str_subset(seq, "CAA((?:(?!CAG).)*)CAG$")
+  
+  if (!is_empty(match)) {
+    triplets <- append(triplets, TRUE)
+  }
+  return(sum(triplets) * 3)
+}
+#--------------------------
+
+
+
+
+message("Start reading df: ", time_start_of_program <- now())
+df <- read_tsv("FAZ10795_pass_barcode20_ac6d2943_c09bf8d7.detail2.txt", col_types = cols(.default = "c"), n_max = 100000)
+message("Finish reading df + start filter: ", time_read_df <- now())
+
+
+
+# select only second seq with CAG; work only with CAG_repeat; filter out NA
+extracted <- df %>%
+  mutate(CAG_repeat = str_match(FIELDS, "^[^,]*,([^,]*),")[,2]) %>%
+  select(CAG_repeat) %>%
+  filter(!is.na(CAG_repeat), CAG_repeat != "NA")
+message("Finished selected and filtered CAG_repeat: ", now())
+
+# count CAGs, length; visualize CAG in [CAG]
+extracted <- extracted %>% 
+  mutate(
+    CAG_count = str_count(CAG_repeat, "CAG"),
+    total_length = str_length(CAG_repeat),
+    highlighted_string = str_replace_all(CAG_repeat, "CAG", "[CAG]")
+  )
+message("Calculated count/length/highlighted: ", now())
+
+
+
+
+# avoid mutate() to parallelize; use furrr ver. of map_chr
+message("Start indexing_errors: ", time_begin_errors <- now())
+extracted$indexing_errors <- future_map_chr(extracted$CAG_repeat, find_cag)
+time_end_errors <- now()
+message("Finished indexing_errors: ", time_end_errors)
+
+
+message("Total error search time: ", time_end_errors-time_begin_errors)
+
+
+
+# ignore CAA before last CAG in length and purity
+extracted <- extracted %>%
+  mutate(
+    corrected_CAG_length = map_int(CAG_repeat, leave_last_CAA),
+    corrected_purity = corrected_CAG_length / total_length
+  )
+
+#View(extracted)
+
+# create signle vector of errors
+all_chunks <- unlist(str_split(extracted$indexing_errors, ",\\s*"))
+chunk_lengths <- str_length(all_chunks)
+chunk_df <- data.frame(length = chunk_lengths)
+#View(chunk_df)
+
+
+library(ggplot2)
+
+ggplot(chunk_df, aes(x = length)) +
+  geom_histogram(binwidth = 1) +
+  labs(
+    title = "Distribution of Chunk Lengths",
+    x = "Chunk Length (# of bases)",
+    y = "Freq"
+  ) +
+  scale_x_continuous(breaks = seq(0, 60, by = 10))+ # NOTE FOR SELF: discrete or continuous?
+  scale_y_continuous(breaks = seq(0, 10000, by = 100))+
+  xlim(0, 60) +
+  ylim(0, 10000) +
+  theme_minimal()
