@@ -6,6 +6,8 @@ library(furrr)
 library(purrr)
 library(data.table)
 
+plan(multisession, workers = 4)
+
 # CUSTOM FUNCTIONS
 
 # 1. --------------------------
@@ -43,7 +45,7 @@ leave_last_CAA <- function(seq){
 message("Start time: ", now())
 
 # read a data.table, with only FIELDS column to modify it
-df <- fread("FAZ10795_pass_barcode20_ac6d2943_c09bf8d7.detail2.txt", nrows = 10000,
+df <- fread("FAZ10795_pass_barcode20_ac6d2943_c09bf8d7.detail2.txt", nrows = 100000,
             select = "FIELDS")
 
 message("Read df: ", now())
@@ -64,15 +66,18 @@ extracted <- df %>%
 
 message("Calculated count/length/highlighted: ", now())
 
-message("Start indexing_errors: ", now())
-View(extracted)
+message("Start indexing_errors: ", time_begin_errors <- now())
+
 # add column with errors from get_sequence_error_delimeter function
 extracted <- extracted %>% 
   mutate(
-    indexing_errors <- future_map_chr(CAG_repeat, get_sequence_error_delimeter)
+    indexing_errors = future_map_chr(CAG_repeat, get_sequence_error_delimeter)
   )
+time_end_errors <- now()
+message("Finished indexing_errors: ", time_end_errors)
 
-message("Finished indexing_errors: ", now())
+message("Total error search time: ", time_end_errors-time_begin_errors)
+
 
 
 # use leave_last_CAA function to calculate correct purity and ignore last CAA before last CAG
