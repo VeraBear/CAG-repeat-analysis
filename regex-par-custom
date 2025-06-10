@@ -25,7 +25,6 @@ registerDoParallel(cl, cores=nThreads)
 get_sequence_error_delimeter <- function(seq){
   comas <- str_replace_all(seq, "(CAG)+", ",")
   final <- str_replace_all(comas, "^,|,$", "")
-  return(final)
 }
 #--------------------------
 
@@ -52,6 +51,29 @@ leave_last_CAA <- function(seq){
 
 
 
+ignore_CAA <- function(seq, error){
+  triplets <- rep(TRUE, str_count(seq, "CAG")) 
+  match <- str_subset(seq, "CAA((?:(?!CAG).)*)CAG$")
+  
+  if (!is_empty(match)) {
+    start_pos <- as.integer(str_locate(error, "CAA")[1,1])
+    end_pos <- as.integer(str_locate(error, "CAA")[1,2])
+    
+    new_string <- paste0(
+      substr(error, 1, start_pos - 1),
+      substr(error, end_pos + 1, nchar(error))
+    )
+    
+    many_to_one_comas <- str_replace_all(new_string, ",+", ",")
+    delete_comas_begin_end <- str_replace_all(many_to_one_comas, "^,|,$", "")
+  } else {
+    delete_comas_begin_end <- error
+  }
+  return(delete_comas_begin_end)
+}
+
+
+
 message("Start time: ", now())
 
 # read a data.table, with only FIELDS column to modify it
@@ -74,6 +96,7 @@ extracted <- df %>%
 
 message("Calculated count/length/highlighted: ", now())
 
+nrow(extracted)
 
 CAG_repeat <- extracted$CAG_repeat
 
@@ -81,9 +104,6 @@ CAG_repeat <- extracted$CAG_repeat
 clusterExport(cl, varlist = c("CAG_repeat", "get_sequence_error_delimeter"))
 clusterEvalQ(cl, {library(stringr)
   library(purrr)})
-
-# parallel character mapping (like map_chr)
-#results <- parLapply(cl, extracted$CAG_repeat, get_sequence_error_delimeter)
 
 
 
@@ -93,24 +113,65 @@ clusterEvalQ(cl, {library(stringr)
 message("Start indexing_errors: ", time_begin_errors <- now())
 #View(extracted)
 # add column with errors from get_sequence_error_delimeter function
-extracted <- extracted %>%
-  mutate(indexing_errors = parLapply(cl, CAG_repeat, get_sequence_error_delimeter))
+indexing_errors <- parLapply(cl, CAG_repeat, get_sequence_error_delimeter)
+indexing_errors <- unlist(indexing_errors)  # convert from list to vector
+
+extracted$indexing_errors <- indexing_errors
 
 
 message("Finished indexing_errors: ", time_end_errors <- now())
-
+nrow(extracted)
 message("Total error search time: ", time_end_errors-time_begin_errors)
 
+
+
+
+input_list <- Map(function(a, b) list(a = a, b = b), CAG_repeat, indexing_errors)
+
+clusterExport(cl, varlist = c("input_list", "ignore_CAA"))
+clusterEvalQ(cl, {
+  library(stringr)
+  library(purrr)
+})
+
+
+message("Start cleaning CAAs: ", time_CAA_b <- now())
+# Run second parallel op
+cleaned_errors <- parLapply(cl, input_list, function(x) ignore_CAA(x$a, x$b))
+cleaned_errors <- unlist(cleaned_errors)
+
+# Add cleaned errors to dataframe
+extracted$cleaned_errors <- cleaned_errors
+
+message("Finished CAAs: ", time_CAA_e <- now())
+message("Total CAA time: ", time_CAA_e-time_CAA_b)
+
+
+
+# Done
 stopCluster(cl)
+
+View(extracted)
+
+
+#extracted <- extracted %>%
+#  mutate(
+ #   cleaned_errors = map2_chr(CAG_repeat, indexing_errors, ignore_CAA)
+  #)
+
+
+
 
 
 message("Start eliminate last CAA + purity: ", time_begin_CAA <- now())
+
 # use leave_last_CAA function to calculate correct purity and ignore last CAA before last CAG
 extracted <- extracted %>%
   mutate(
     CAG_length = map_int(CAG_repeat, leave_last_CAA),
     purity = CAG_length / total_length
   )
+
 message("Finished eliminate last CAA + purity: ", time_end_CAA <- now())
 message("Total CAA + purity time: ", time_end_CAA-time_begin_CAA)
 
@@ -121,9 +182,24 @@ message("Total CAA + purity time: ", time_end_CAA-time_begin_CAA)
 # get lengths of each error for distribution of lengths
 
 message("Start distrib error lengths: ", time_begin_distr <- now())
+
+
 single_vector_errors <- unlist(str_split(extracted$indexing_errors, ","))
+
+
+chunk_freqs <- table(single_vector_errors)
+error_summary <- data.frame(
+  sequence = unique(single_vector_errors),
+  frequency = as.integer(chunk_freqs[unique(single_vector_errors)])
+)
+
+error_summary_final <- error_summary %>% arrange(desc(frequency))
+#View(error_summary_final)
+
+
 length_distrib_error <- str_length(single_vector_errors)
 df_distrib_error_length <- data.frame(length = length_distrib_error)
+
 message("Finish distrib error lengths: ", time_end_distr <- now())
 message("Total distribution time: ", time_end_distr-time_begin_distr)
 #--------------------
@@ -138,8 +214,6 @@ ggplot(df_distrib_error_length, aes(x = length)) +
     x = "Chunk Length (# of bases)",
     y = "Freq"
   ) +
-  scale_x_continuous(breaks = seq(0, 60, by = 10))+ # NOTE FOR SELF: discrete or continuous?
-  scale_y_continuous(breaks = seq(0, 10000, by = 100))+
-  xlim(0, 60) +
-  ylim(0, 10000) +
+#  scale_x_continuous(breaks = seq(0, 20, by = 10))+ # NOTE FOR SELF: discrete or continuous?
+  xlim(0, 20) +
   theme_minimal()
