@@ -1,0 +1,351 @@
+library(tidyverse)
+library(stringr)
+library(stringi)
+library(purrr)
+library(data.table)
+library(doParallel)
+library(ggplot2)
+
+# SET UP PARALLEL
+#++++++++++++++++++++++++++++
+# detect cores in machine (mine has 4 cores)
+# initialise cluster of threads
+# register the cluster
+nThreads <- detectCores()
+cl <- makeCluster(nThreads)
+registerDoParallel(cl, cores=nThreads)
+#----------------------------
+
+
+
+# 2. ++++++++++++++++++++++++++
+# function to not error CAA before last CAG, leaving room for possible seq error
+# create logical vector, length of number of CAG
+# create chr vector match that matches the initial string if regex TRUE or is empty vector if regex FALSE
+# Expl to regex: find CAA before last CAG, there can be any number of characters in between, but should not contain a single CAG
+# if match vector is not empty, add one more TRUE to triplets, which would make up for "1 additional CAG"
+# Used only for counting CAG total length and purity
+
+leave_last_CAA <- function(seq){
+  triplets <- rep(TRUE, str_count(seq, "CAG")) 
+  match <- str_subset(seq, "CAA((?:(?!CAG).)*)CAG$")
+  
+  if (!is_empty(match)) {
+    triplets <- append(triplets, TRUE)
+  }
+  return(sum(triplets) * 3)
+}
+#--------------------------
+
+#======================
+
+# 3. ++++++++++++++++++++++
+# function to find the number of interruptions
+
+func_num_interruptions <- function(seq){
+  vector_interruptions <- str_split(seq, ",")[[1]]
+  if (all(vector_interruptions == "")){
+    return(0)
+  }
+  return(length(vector_interruptions))
+}
+#--------------------------
+
+#======================
+
+# 3. +++++++++++++++++++++++++++
+# function to find deletion errors (CA, CG, AG)
+func_detect_deletions <- function(seq) {
+  
+  vector_interruptions <- str_split(seq, ",")[[1]]
+  
+  if (length(vector_interruptions) == 0 || all(vector_interruptions == "")) {
+    return("None")
+  }
+  
+  possible_deletions <- which(vector_interruptions %in% c("CA", "CG", "AG"))
+  
+  if (any(possible_deletions)){
+    deletions <- vector_interruptions[possible_deletions]
+    return(paste(deletions, collapse = ","))
+  } else {
+    return("None")
+  }
+}
+#--------------------------
+
+extracted <- readRDS("extracted_ver.2.rds")
+indexing_errors <- extracted$indexing_errors
+
+#----------------------
+# get number of interruptions in sequence
+clusterExport(cl, varlist = c("indexing_errors", "func_num_interruptions"))
+clusterEvalQ(cl, {library(stringr)
+  library(purrr)
+  library(dplyr)})
+
+
+num_interruptions <- parLapply(cl, indexing_errors, func_num_interruptions)
+num_interruptions <- unlist(num_interruptions)  # convert from list to vector
+
+extracted$num_interruptions <- num_interruptions
+
+
+#----------------------
+# new column with deletion errors
+clusterExport(cl, varlist = c("indexing_errors", "func_detect_deletions"))
+clusterEvalQ(cl, {library(stringr)
+  library(purrr)
+  library(dplyr)})
+
+
+possible_deletions <- parLapply(cl, indexing_errors, func_detect_deletions)
+possible_deletions <- unlist(possible_deletions)  # convert from list to vector
+
+extracted$possible_deletions <- possible_deletions
+
+
+#----------------------
+# find the number of deletion errors in every row
+clusterExport(cl, varlist = c("possible_deletions", "func_num_interruptions"))
+clusterEvalQ(cl, {library(stringr)
+  library(purrr)
+  library(dplyr)})
+
+
+num_deletions <- parLapply(cl, possible_deletions, func_num_interruptions)
+num_deletions <- unlist(num_deletions)  # convert from list to vector
+
+extracted$num_deletions <- num_deletions
+
+stopCluster(cl)
+
+
+
+
+
+
+message("Start eliminate last CAA + purity: ", time_begin_CAA <- now())
+
+# use leave_last_CAA function to calculate correct purity and ignore last CAA before last CAG
+extracted <- extracted %>%
+  mutate(
+    CAG_length = map_int(CAG_repeat, leave_last_CAA),
+    purity = CAG_length / total_length
+  )
+
+message("Finished eliminate last CAA + purity: ", time_end_CAA <- now())
+message("Total CAA + purity time: ", time_end_CAA-time_begin_CAA)
+
+
+
+# SINGLE VECTOR ERRORS --------------------
+
+# create single vector from indexing_errors
+# create a summary of interruptions table
+# get lengths of each error for distribution of lengths
+
+message("Start distrib error lengths: ", time_begin_distr <- now())
+
+single_vector_errors <- unlist(str_split(extracted$indexing_errors, ","))
+
+chunk_freqs <- table(single_vector_errors)
+error_summary <- data.frame(
+  sequence = unique(single_vector_errors),
+  frequency = as.integer(chunk_freqs[unique(single_vector_errors)])
+)
+
+
+
+error_summary <- error_summary %>% arrange(desc(frequency))
+
+
+len_seq <- error_summary %>% arrange(nchar(sequence), desc(frequency))
+
+length_distrib_error <- str_length(single_vector_errors)
+df_distrib_error_length <- data.frame(length = length_distrib_error)
+
+message("Finish distrib error lengths: ", time_end_distr <- now())
+message("Total distribution time: ", time_end_distr-time_begin_distr)
+#--------------------
+
+
+a <- sum(length_distrib_error == 6)
+
+
+# DELETION ERRORS % 3 --------------------
+
+# create a table with all deletions
+
+single_vector_deletions <- unlist(str_split(extracted$possible_deletions, ","))
+extracted_deletions <- table(single_vector_deletions)
+deletions_summary <- data.frame(
+  deletion = unique(single_vector_deletions),
+  Freq = as.integer(extracted_deletions[unique(single_vector_deletions)])
+)
+
+deletions_summary <- deletions_summary %>% arrange(desc(Freq))
+#--------------------
+
+
+
+
+
+
+# DIVIDE CHUNKS % 3 --------------------
+
+# divide each chunk into triplets if it is multiple of 3
+# create a table with desc sorted most common triplets
+
+triplet_errors <- function(seq) {
+  if (nchar(seq) %% 3 == 0){
+    
+    stri_extract_all_regex(seq, ".{1,3}")[[1]]
+  }
+}
+
+message("Start extracting triplets: ", time_b_extract <- now())
+triplets_within_interruptions <- single_vector_errors %>%             
+  map(triplet_errors) %>%        
+  unlist(use.names = FALSE)
+message("Finished extracting triplets: ", time_e_extract <- now())
+message("Total time extracting: ", time_e_extract-time_b_extract)
+
+
+extracted_triplets <- table(triplets_within_interruptions)
+triplets_summary <- data.frame(
+  triplet = unique(triplets_within_interruptions),
+  Freq = as.integer(extracted_triplets[unique(triplets_within_interruptions)])
+)
+
+triplets_summary <- triplets_summary %>% arrange(desc(Freq))
+triplets_summary <- triplets_summary %>% 
+  filter(!is.na(triplet))
+
+
+# CGG is too large...
+# drop CGG and create a new table
+without_CGG <- triplets_summary[triplets_summary$Freq!=max(triplets_summary$Freq),]
+#--------------------
+
+
+
+# GRAPH DELETIONS ----------------------
+
+library(ggplot2)
+
+ggplot(deletions_summary, aes(x = reorder(deletion, -Freq), y = Freq)) +
+  geom_col(color="black", fill="steelblue") +
+  scale_x_discrete(labels = c("CA" = "G", "AG" = "C", "CG" = "A"))+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Frequency of Deletion Errors (lost G, lost A, lost C)",
+    x = "Deleted base",
+    y = "# of occurences"
+  )  
+#--------------------
+
+
+
+
+
+
+
+# GRAPH TRIPLETS ----------------------
+
+# graph distribution of triplets
+
+ggplot(triplets_summary, aes(x = reorder(triplet, -Freq), y = Freq)) +
+  geom_col(color="black", fill="steelblue") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Triplet Frequency in 3 bp-Multiple Interruptions",
+    x = "Triplet",
+    y = "# of occurences"
+  )  
+#--------------------
+
+
+
+
+# GRAPH TRIPLETS (NO CGG) ----------------------
+
+# graph distribution of triplets (drop CGG)
+
+ggplot(without_CGG, aes(x = reorder(triplet, -Freq), y = Freq)) +
+  geom_col(color="black", fill="steelblue") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Triplet Frequency in 3 bp-Multiple Interruptions (drop CGG)",
+    x = "Triplet (drop CGG)",
+    y = "# of occurences"
+  )  
+#----------------------
+
+
+
+
+# GRAPH DISTRIBUTION OF LENGTHS ----------------------
+# graph distribution of chunk lengths
+
+ggplot(df_distrib_error_length, aes(x = length)) +
+  geom_histogram(binwidth = 1, color="black", fill="steelblue") +
+  labs(
+    title = "Distribution of Interruption Lengths",
+    x = "Interruption Length (# of bases)",
+    y = "# of interruptions"
+  ) +
+  xlim(0, 40) 
+#---------------------
+
+
+# GRAPH DISTRIBUTION OF NUMBER DELETIONS ----------------------
+# graph distribution of number of deletions per sequence
+ggplot(extracted, aes(x = num_deletions)) +
+  geom_histogram(binwidth = 1, color="black", fill="steelblue") +
+  labs(
+    title = "Distribution of Number of Deletions Per Sequence",
+    x = "# of deletions per sequence",
+    y = "# of sequences"
+  ) +
+  xlim(-1, 30)
+#---------------------
+
+
+
+
+
+
+
+# GRAPH DISTRIBUTION OF NUMBER INSERTIONS ----------------------
+# graph distribution of number of interruptions per sequence
+
+ggplot(extracted, aes(x = num_interruptions)) +
+  geom_histogram(binwidth = 1, color="black", fill="steelblue") +
+  labs(
+    title = "Distribution of Number of Interruptions",
+    x = "# of interruptions per sequence",
+    y = "# of sequences"
+  ) +
+  xlim(-1, 30)
+#---------------------
+
+
+
+
+# GRAPH DISTRIBUTION OF PURITY ----------------------
+# graph distribution of purity
+
+ggplot(extracted, aes(x = purity)) +
+  geom_histogram(color="black", fill="steelblue") +
+  labs(
+    title = "Distribution of Purity",
+    x = "Purity value (CAG_length/total_length)",
+    y = "# of sequences"
+  ) 
+#---------------------
+
+View(triplets_summary)
+View(without_CGG)
+View(df_distrib_error_length)
+View(error_summary)
