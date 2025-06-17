@@ -1,0 +1,64 @@
+
+
+# get a length for each interruption
+# group by length and assign a rank based on frequency
+len_seq <- error_summary %>% 
+  mutate(length = nchar(sequence)) %>% 
+  group_by(length) %>%
+  arrange(nchar(sequence), desc(frequency)) %>% 
+  filter(!is.na(frequency)) %>% 
+  mutate(rank = row_number()) %>% 
+  ungroup()
+
+
+# leave top 4 interruptions, and assign everything else to "other"
+# summarize all "other" into 1 within each group (length) and add frequencies
+unfiltered <- len_seq %>% 
+  mutate(grouped_seq = if_else(rank<=4, sequence, "other")) %>% 
+  select(grouped_seq, frequency, length) %>% 
+  group_by(length, grouped_seq) %>% 
+  summarise(frequency = sum(frequency)) %>% 
+  ungroup() %>% 
+  arrange(desc(frequency))
+
+
+# assign new ranking without "other" based on frequencies grouped by lengths
+no_other <- unfiltered %>% 
+  filter(grouped_seq != "other") %>% 
+  group_by(length) %>%
+  mutate(rank = row_number())
+  
+# to all "other" force assign rank 5
+with_other <- unfiltered %>% 
+  filter(grouped_seq == "other") %>% 
+  mutate(rank = 5)
+
+# merge them together
+new_len <- bind_rows(no_other, with_other)
+
+
+# assign colors based on rank
+plot_data <- new_len %>%
+  group_by(length) %>%
+  arrange(desc(frequency)) %>%
+  mutate(color = case_when(
+    grouped_seq == "other" ~ "darkgrey",
+    rank == 1 ~ "red",
+    rank == 2 ~ "purple",
+    rank == 3 ~ "orange",
+    rank == 4 ~ "green",
+    rank >  4 ~ "blue"
+  )) %>%
+  ungroup()
+
+
+# plot the stacked bar graph and exclude legend for now
+ggplot(plot_data, aes(x = factor(length), y = frequency, fill = color)) +
+  geom_col() +
+  scale_fill_identity() +
+  labs(
+    title = "Length by Top 3 Interruptions",
+    x = "Interruption Length (# of bases)",
+    y = "# of interruptions"
+  ) +
+  scale_x_discrete(limits = as.character(-1:60))
