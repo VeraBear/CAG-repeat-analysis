@@ -2,7 +2,7 @@
 
 # get a length for each interruption
 # group by length and assign a rank based on frequency
-len_seq <- error_summary %>% 
+len_rank_error_summary <- error_summary %>% 
   mutate(length = nchar(sequence)) %>% 
   group_by(length) %>%
   arrange(nchar(sequence), desc(frequency)) %>% 
@@ -13,7 +13,7 @@ len_seq <- error_summary %>%
 
 # leave top 4 interruptions, and assign everything else to "other"
 # summarize all "other" into 1 within each group (length) and add frequencies
-unfiltered <- len_seq %>% 
+unfiltered <- len_rank_error_summary %>% 
   mutate(grouped_seq = if_else(rank<=4, sequence, "other")) %>% 
   select(grouped_seq, frequency, length) %>% 
   group_by(length, grouped_seq) %>% 
@@ -37,14 +37,24 @@ with_other <- unfiltered %>%
 new_len <- bind_rows(no_other, with_other)
 
 
+
+new_len <- new_len %>% 
+  mutate(interesting = ifelse(str_detect(grouped_seq,"^(CGG)+$"), "CGG_n", NA)) %>% 
+  mutate(interesting = ifelse(str_detect(grouped_seq,"^(CGG)+(CGA)$"), "CGA_end", interesting)) %>%
+  mutate(interesting = ifelse(str_detect(grouped_seq,"^(CA)+$"), "CA_n", interesting))
+
+
 # assign colors based on rank
 plot_data <- new_len %>%
   group_by(length) %>%
   arrange(desc(frequency)) %>%
   mutate(color = case_when(
     grouped_seq == "other" ~ "darkgrey",
-    rank == 1 ~ "red",
-    rank == 2 ~ "purple",
+    interesting == "CGG_n" ~ "darkgreen",
+    interesting == "CGA_end" ~ "cyan1",
+    interesting == "CA_n" ~ "red",
+    rank == 1 ~ "magenta",
+    rank == 2 ~ "purple4",
     rank == 3 ~ "orange",
     rank == 4 ~ "green",
     rank >  4 ~ "blue"
@@ -52,13 +62,60 @@ plot_data <- new_len %>%
   ungroup()
 
 
-# plot the stacked bar graph and exclude legend for now
+
+
+#plot_data <- plot_data %>%
+#  group_by(length) %>%
+#  arrange(length, desc(frequency)) %>%
+#  ungroup()
+
+#plot_data <- plot_data %>%
+#  mutate(fill_order = fct_reorder(color, -frequency, .fun = sd, .desc = TRUE))
+
+
 ggplot(plot_data, aes(x = factor(length), y = frequency, fill = color)) +
   geom_col() +
-  scale_fill_identity() +
+  scale_fill_identity(guide = "legend",
+                      name = "Legend",
+                      breaks = c("magenta", "purple4", "orange", "green", "blue", "red", "cyan1", "darkgreen", "darkgrey"),
+                      labels = c("1", "2", "3", "4", "5", "CA_n", "CGA_end", "CGG_n", "Other")) +
   labs(
-    title = "Length by Top 3 Interruptions",
+    title = "Length by Top 4 Interruptions + Interesting (CGG, CA, CGA interruption)",
     x = "Interruption Length (# of bases)",
     y = "# of interruptions"
   ) +
-  scale_x_discrete(limits = as.character(-1:60))
+  scale_x_discrete(limits = as.character(0:60))
+
+  
+  # plot the stacked bar graph and exclude legend for now
+ggplot(plot_data, aes(x = factor(length), y = frequency, fill = color)) +
+    geom_col() +
+    scale_fill_identity() +
+    labs(
+      title = "Length by Top 3 Interruptions",
+      x = "Interruption Length (# of bases)",
+      y = "# of interruptions"
+    ) +
+    scale_x_discrete(limits = as.character(60:80))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
